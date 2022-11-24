@@ -1,3 +1,4 @@
+"""The module of layered architecture of reconfigurable linear optical interferometer"""
 from typing import List, Union
 from types import SimpleNamespace
 from tqdm import tqdm
@@ -9,8 +10,17 @@ from iloptics import LOTransformation, project_uni
 
 
 class MixLayer(LOTransformation):
+    """Mixing layer of the layered chip"""
     @classmethod
     def random(cls, dim: int, hadamard_like: bool = True, hadamard_error: float = 0., max_losses: float = 0.):
+        """Generates random mixing layer
+
+        :param dim: Layer dimension
+        :param hadamard_like: If True, the transfer matrix would have the form of Hadamard transform
+        :param hadamard_error: The error of setting the Hadamard transform
+        :param max_losses: Maximum losses inside the layer
+        :return: Instance of MixingLayer
+        """
         if hadamard_like:
             u = dft(dim) / np.sqrt(dim)
             if hadamard_error > 0.:
@@ -29,10 +39,22 @@ class MixLayer(LOTransformation):
 
     @classmethod
     def dummy(cls, dim: int):
+        """Generates a dummy mixing layer that does nothing (identity transformation)
+
+        :param dim: Layer dimension
+        :return: Instance of MixingLayer
+        """
         return cls(np.eye(dim, dtype=complex))
 
 
 class PhaseLayer(LOTransformation):
+    """Phase layer of layered chip
+
+    :param dim: Layer dimension
+    :param coupling: Linear control-phase coupling constant (the phase value when the control value is 1.)
+    :param noise: Relative Gaussian noise level of control parameters
+    :param cross_talk: Cross-talk strength
+    """
     def __init__(
             self,
             dim: int,
@@ -51,21 +73,29 @@ class PhaseLayer(LOTransformation):
 
     @property
     def controls(self) -> np.ndarray:
+        """Current control values"""
         return self._controls
 
     @property
     def coupling(self) -> float:
+        """Linear control-phase coupling constant"""
         return self._coupling
 
     @property
     def noise(self) -> float:
+        """Relative Gaussian noise level of control parameters"""
         return self._noise
 
     @property
     def cross_talk(self) -> float:
+        """Cross-talk strength"""
         return self._cross_talk
 
     def control(self, controls: Union[List[float], np.ndarray]):
+        """Sets the phase layer controls
+
+        :param controls: Control values
+        """
         assert len(controls) == self.dim
         self._controls = np.array(controls)
         if self.noise > 0.:
@@ -76,9 +106,19 @@ class PhaseLayer(LOTransformation):
         return self
 
     def phases2controls(self, phases: Union[List[float], np.ndarray]) -> np.ndarray:
+        """Calculates the controls required to set the particular phases
+
+        :param phases: Target phases
+        :return: Controls
+        """
         return self._control_matrix_inv @ phases
 
     def set(self, noise: float = None, cross_talk: float = None):
+        """Sets the noise level and cross-talk strength
+
+        :param noise: Noise level (by default the previous value holds)
+        :param cross_talk: Cross-talk strength (by default the previous value holds)
+        """
         if noise is not None:
             self._noise = noise
 
@@ -95,10 +135,23 @@ class PhaseLayer(LOTransformation):
 
     @staticmethod
     def ascending_phases(d: int) -> np.ndarray:
+        """Returns the list of phases, distributed uniformly on unit circle
+
+        :param d: Number of phases
+        :return: Array of phases values
+        """
         return np.array([j / d * 2 * np.pi for j in range(d)])
 
 
 class LearnProtoElement(SimpleNamespace):
+    """Protocol element for fast chip learning
+
+    :param phase_layer: Instance of the phase layer to control (None means all phase layers are disabled)
+    :param controls: Phase layer controls (None means all controls are disabled)
+    :param mix_layer: Instance of mixing layer subjected to reconstruction
+    :param columns_idx: List of indices of inverse mixing layer columns subjected to reconstruction
+    :param data: The measured chip transfer matrix
+    """
     phase_layer: PhaseLayer = None
     controls: np.ndarray = None
     mix_layer: MixLayer = None
@@ -107,6 +160,11 @@ class LearnProtoElement(SimpleNamespace):
 
 
 class Chip(LOTransformation):
+    """Layered chip
+
+    :param layers: List of chip layers
+    :param noise_tomo: The statistical noise of chip measurement
+    """
     def __init__(self, layers: List[LOTransformation], noise_tomo: float = 0.):
         assert len(layers) > 0
         self._layers = layers
@@ -122,6 +180,7 @@ class Chip(LOTransformation):
         self._update()
 
     def _update(self):
+        """Updates the chip transfer matrix taking the layers changes into account"""
         tm = np.eye(self.dim, dtype=complex)
         for layer in self.layers:
             tm = layer.tm @ tm
@@ -131,39 +190,57 @@ class Chip(LOTransformation):
 
     @property
     def dim(self) -> int:
+        """Chip dimension (number of input/output modes)"""
         return self._dim
 
     @property
     def layers(self) -> List[LOTransformation]:
+        """List of chip layers"""
         return self._layers
 
     @property
     def mix_layers(self) -> List[MixLayer]:
+        """List of chip mixing layers"""
         return self._mix_layers
 
     @property
     def phase_layers(self) -> List[PhaseLayer]:
+        """List of chip phase layers"""
         return self._phase_layers
 
     @property
     def num_phase_layers(self) -> int:
+        """Number of phase layers"""
         return len(self.phase_layers)
 
     def __len__(self):
+        """Total number of layers"""
         return len(self._layers)
 
     @property
     def controls(self) -> List[np.ndarray]:
+        """Current phase layers controls"""
         return self._controls
 
     def reset(self):
-        return self.control([np.zeros(self.dim)] * len(self.phase_layers))
+        """Resets the phase layers controls to zero"""
+        self.control([np.zeros(self.dim)] * len(self.phase_layers))
+        return self
 
     def control_layer(self, idx: int, controls: np.ndarray):
+        """Sets the controls of a phase layer by index
+
+        :param idx: Phase layer index
+        :param controls: Phase layer controls
+        """
         self.phase_layers[idx].control(controls)
         return self._update()
 
     def control(self, controls: List[np.ndarray]):
+        """Sets the controls of all phase layers
+
+        :param controls: List of phase layers controls
+        """
         assert len(controls) == len(self._phase_layers)
         self._controls = controls
         for layer, layer_controls in zip(self._phase_layers, controls):
@@ -171,9 +248,18 @@ class Chip(LOTransformation):
         return self._update()
 
     def random_controls(self, max_value: float = 1.) -> List[np.ndarray]:
+        """Generates random phase layers controls
+
+        :param max_value: Maximum control parameter value
+        :return: List of phase layers controls
+        """
         return [np.random.rand(self.dim) * max_value for _ in range(len(self._phase_layers))]
 
     def tomo(self) -> np.ndarray:
+        """Performs the chip tomography
+
+        :return: Returns chip transfer matrix with statistical errors
+        """
         tm = self.tm.copy()
         if self.noise_tomo > 0.:
             tm += self.noise_tomo * (np.random.randn(self.dim, self.dim) + 1j * np.random.randn(self.dim, self.dim))
@@ -192,6 +278,19 @@ class Chip(LOTransformation):
             max_losses: float = 0.,
             noise_tomo: float = 0.
     ):
+        """Generates random chip
+
+        :param dim: Chip dimension
+        :param num_phase_layers: Number of phase layers
+        :param control_coupling: Phase layers control-phase coupling constant
+        :param control_noise: Phase layers control noise
+        :param control_cross_talk: Phase layers cross-talk strength
+        :param hadamard_like: If True, the mixing layers transfer matrices would have the form of Hadamard transform
+        :param hadamard_error: The error of setting the Hadamard transforms
+        :param max_losses: Maximum losses inside mixing layers
+        :param noise_tomo: The statistical noise of chip measurement
+        :return: Chip instance
+        """
         layers = []
         for _ in range(num_phase_layers):
             layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, max_losses))
@@ -201,20 +300,34 @@ class Chip(LOTransformation):
 
     @classmethod
     def dummy(cls, dim: int, num_phase_layers: int, phase_layer_prototype: PhaseLayer):
+        """
+        Creates dummy layered chip (mixing layers do nothing)
+
+        :param dim: Chip dimension
+        :param num_phase_layers: Number of phase layers
+        :param phase_layer_prototype: Prototype of phase layers
+        :return: Chip instance
+        """
         layers = []
         for _ in range(num_phase_layers):
             layers += [MixLayer.dummy(dim), phase_layer_prototype.copy()]
         layers.append(MixLayer.dummy(dim))
         return cls(layers)
 
-    @classmethod
-    def learn_proto(cls, dim: int, phase_layers: List[PhaseLayer], max_columns: int = None):
+    def learn_proto(self, max_columns: int = None):
+        """
+        Generates the chip learning protocol
+
+        :param max_columns: Maximum number of mixing layer columns to estimate at a time
+        :return: List of protol elements
+        """
+        dim = self.dim
         if max_columns is None:
             max_columns = dim
 
         layers = []
         proto = [LearnProtoElement()]
-        for phase_layer in phase_layers:
+        for phase_layer in self.phase_layers:
             mix_layer = MixLayer.dummy(dim)
             layers += [mix_layer, phase_layer]
             for offset in range(0, dim, max_columns):
@@ -240,9 +353,15 @@ class Chip(LOTransformation):
                 ))
         layers.append(MixLayer.dummy(dim))
 
-        return cls(layers), proto
+        return proto
 
     def learn(self, proto: List[LearnProtoElement], uni=False, disp=False):
+        """Learns chip mixing layers
+
+        :param proto: Learning protocol (including data)
+        :param uni: Use unitary constraint on mixing layers
+        :param disp: Display progress
+        """
         # All phases are disable
         v0 = [p.data for p in proto if p.phase_layer is None][0]
         v0_inv = v0.conj().T if uni else np.linalg.inv(v0)
@@ -253,7 +372,7 @@ class Chip(LOTransformation):
             u_inv = mix_layer.tm.conj().T if uni else np.linalg.inv(mix_layer.tm)
             proto_j = [p for p in proto if p.mix_layer == mix_layer]
             for p in proto_j:
-                cols = eig_phase_sorted(v_total @ v0_inv @ p.data @ v_total_inv, len(p.columns_idx))
+                cols = _eig_phase_sorted(v_total @ v0_inv @ p.data @ v_total_inv, len(p.columns_idx))
                 u_inv[:, p.columns_idx] = cols
             # Get direct matrix
             if uni:
@@ -275,7 +394,7 @@ class Chip(LOTransformation):
         return self._update()
 
 
-def eig_phase_sorted(a: np.ndarray, col_d: int):
+def _eig_phase_sorted(a: np.ndarray, col_d: int):
     w, v = np.linalg.eig(a)
     phases = np.mod(np.angle(w) + (2 * np.pi), 2 * np.pi)
     idx_sorted = np.argsort(phases)
