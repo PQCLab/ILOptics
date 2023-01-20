@@ -11,13 +11,21 @@ from iloptics import LOTransformation, ReconfigurableLOTransformation, ProtoElem
 class MixLayer(LOTransformation):
     """Mixing layer of the layered chip"""
     @classmethod
-    def random(cls, dim: int, hadamard_like: bool = True, hadamard_error: float = 0., max_losses: float = 0.):
+    def random(
+            cls,
+            dim: int,
+            hadamard_like: bool = True,
+            hadamard_error: float = 0.,
+            uniform_losses: float = 0.,
+            non_uniform_losses: float = 0.,
+    ):
         """Generates random mixing layer
 
         :param dim: Layer dimension
         :param hadamard_like: If True, the transfer matrix would have the form of Hadamard transform
         :param hadamard_error: The error of setting the Hadamard transform
-        :param max_losses: Maximum losses inside the layer
+        :param uniform_losses: The level on uniform linear losses
+        :param non_uniform_losses: The level of non-uniform linear losses
         :return: Instance of MixingLayer
         """
         if hadamard_like:
@@ -30,9 +38,11 @@ class MixLayer(LOTransformation):
                 mode="complete"
             )
 
-        if max_losses > 0:
+        if uniform_losses + non_uniform_losses > 0:
             squ = np.array(sqrtm(u))
-            s = (1 - np.random.rand(dim) * max_losses)
+            s = (1 - uniform_losses - np.random.rand(dim) * non_uniform_losses)
+            if any(s) < 0:
+                raise RuntimeError('Linear losses are too high')
             u = squ @ np.diag(s) @ squ
         return cls(u)
 
@@ -207,27 +217,29 @@ class Layered(ReconfigurableLOTransformation):
             control_cross_talk: float = 0.,
             hadamard_like: bool = True,
             hadamard_error: float = 0.,
-            max_losses: float = 0.,
+            uniform_losses: float = 0.,
+            non_uniform_losses: float = 0.,
             noise_tomo: float = 0.
     ):
-        """Generates random transformation
+        """Generates random transformation.
 
-        :param dim: Number of input/output modes
-        :param num_phase_layers: Number of phase layers
-        :param control_coupling: Phase layers control-phase coupling constant
-        :param control_noise: Phase layers control noise
-        :param control_cross_talk: Phase layers cross-talk strength
-        :param hadamard_like: If True, the mixing layers transfer matrices would have the form of Hadamard transform
-        :param hadamard_error: The error of setting the Hadamard transforms
-        :param max_losses: Maximum losses inside mixing layers
-        :param noise_tomo: Statistical noise of transformation tomography
-        :return: Transformation instance
+        :param dim: Number of input/output modes.
+        :param num_phase_layers: Number of phase layers.
+        :param control_coupling: Phase layers control-phase coupling constant.
+        :param control_noise: Phase layers control noise.
+        :param control_cross_talk: Phase layers cross-talk strength.
+        :param hadamard_like: If True, the mixing layers transfer matrices would have the form of Hadamard transform.
+        :param hadamard_error: The error of setting the Hadamard transforms.
+        :param uniform_losses: The level on uniform linear losses.
+        :param non_uniform_losses: The level of non-uniform linear losses.
+        :param noise_tomo: Statistical noise of transformation tomography.
+        :return: Transformation instance.
         """
         layers = []
         for _ in range(num_phase_layers):
-            layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, max_losses))
+            layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, uniform_losses, non_uniform_losses))
             layers.append(PhaseLayer(dim, control_coupling, control_noise, control_cross_talk))
-        layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, max_losses))
+        layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, uniform_losses, non_uniform_losses))
         return cls(layers, noise_tomo)
 
     @classmethod

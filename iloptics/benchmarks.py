@@ -57,14 +57,19 @@ def df95(
 
 def dt_max(lt_rec: Layered, lt_true: Layered) -> float:
     """This benchmark estimates the accuracy of mixing layer reconstruction for layered architecture.
+    The benchmark returns the maximum error of determining the transmission coefficients (up to global losses).
 
     :param lt_rec: Reconstructed layered transformation
     :param lt_true: True layered transformation
     :return: Benchmark value
     """
     assert len(lt_rec.mix_layers) == len(lt_true.mix_layers)
+    dim = lt_rec.dim
     dt = 0.
     for ml1, ml2 in zip(lt_true.mix_layers, lt_rec.mix_layers):
+        # Transmission coefficients
         t1, t2 = np.abs(ml1.tm) ** 2, np.abs(ml2.tm) ** 2
+        # Divide by global losses
+        t1, t2 = t1 / (np.sum(t1) / dim), t2 / (np.sum(t2) / dim)
         dt = max(dt, max(np.abs(t1 - t2).flatten()))
     return dt
