@@ -50,7 +50,7 @@ class LOTransformation:
     def tomo(self) -> np.ndarray:
         """Performs the chip tomography
 
-        :return: Returns chip transfer matrix with statistical errors
+        :return: Returns chip transfer matrix with statistical errors up to global phase
         """
         tm = self.tm.copy()
         if self.noise_tomo > 0.:

@@ -128,7 +128,7 @@ class PhaseLayer(ReconfigurableLOTransformation):
 
         if cross_talk is not None:
             self._cross_talk = cross_talk
-            self._control_matrix = np.eye(self.dim) * self.coupling
+            self._control_matrix = np.eye(self.dim)
             if cross_talk > 0.:
                 for k in range(1, self.dim):
                     control_ct = np.exp(-(k / cross_talk) ** 2 / 2)
@@ -211,7 +211,8 @@ class Layered(ReconfigurableLOTransformation):
     def generate(
             cls,
             dim: int,
-            num_phase_layers: int,
+            num_phase_layers: int = None,
+            *,
             control_coupling: float = 2 * np.pi,
             control_noise: float = 0.,
             control_cross_talk: float = 0.,
@@ -224,7 +225,7 @@ class Layered(ReconfigurableLOTransformation):
         """Generates random transformation.
 
         :param dim: Number of input/output modes.
-        :param num_phase_layers: Number of phase layers.
+        :param num_phase_layers: Number of phase layers (dim + 1 by default).
         :param control_coupling: Phase layers control-phase coupling constant.
         :param control_noise: Phase layers control noise.
         :param control_cross_talk: Phase layers cross-talk strength.
@@ -235,30 +236,37 @@ class Layered(ReconfigurableLOTransformation):
         :param noise_tomo: Statistical noise of transformation tomography.
         :return: Transformation instance.
         """
+        if num_phase_layers is None:
+            num_phase_layers = dim + 1
+
         layers = []
-        for _ in range(num_phase_layers):
-            layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, uniform_losses, non_uniform_losses))
+        for idx_phase_layer in range(num_phase_layers):
             layers.append(PhaseLayer(dim, control_coupling, control_noise, control_cross_talk))
-        layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, uniform_losses, non_uniform_losses))
+            if idx_phase_layer < num_phase_layers - 1:
+                layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, uniform_losses, non_uniform_losses))
         return cls(layers, noise_tomo)
 
     @classmethod
-    def dummy(cls, dim: int, num_phase_layers: int, phase_layer_prototype: PhaseLayer = None):
+    def dummy(cls, dim: int, num_phase_layers: int = None, phase_layer_prototype: PhaseLayer = None):
         """
         Creates dummy layered transformation (mixing layers do nothing)
 
         :param dim: Number of input/output modes
-        :param num_phase_layers: Number of phase layers
+        :param num_phase_layers: Number of phase layers (dim + 1 by default)
         :param phase_layer_prototype: Prototype of phase layers (PhaseLayer(dim) by default)
         :return: Transformation instance
         """
+        if num_phase_layers is None:
+            num_phase_layers = dim + 1
+
         if phase_layer_prototype is None:
             phase_layer_prototype = PhaseLayer(dim)
 
         layers = []
-        for _ in range(num_phase_layers):
-            layers += [MixLayer.dummy(dim), phase_layer_prototype.copy()]
-        layers.append(MixLayer.dummy(dim))
+        for idx_phase_layer in range(num_phase_layers):
+            layers.append(phase_layer_prototype.copy())
+            if idx_phase_layer < num_phase_layers - 1:
+                layers.append(MixLayer.dummy(dim))
         return cls(layers)
 
     def learn_proto(self, max_columns: int = None):
@@ -273,12 +281,9 @@ class Layered(ReconfigurableLOTransformation):
             max_columns = dim
 
         proto = [ProtoElement()]
-        for phase_layer in self.phase_layers:
-            idx = self.layers.index(phase_layer)
-            if idx == 0:
-                continue
-            mix_layer = self.layers[idx - 1]
-            assert isinstance(mix_layer, MixLayer)
+        for mix_layer in self.mix_layers[:-1]:
+            phase_layer = self.layers[self.layers.index(mix_layer) + 1]
+            assert isinstance(phase_layer, PhaseLayer)
 
             for offset in range(0, dim, max_columns):
                 d = max_columns
