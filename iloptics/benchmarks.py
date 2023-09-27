@@ -3,15 +3,20 @@ from typing import Union, List, Tuple
 
 import numpy as np
 
-from iloptics import LOTransformation, ReconfigurableLOTransformation
+from iloptics.lt import LOTransformation, ReconfigurableLOTransformation
 from iloptics.layered import Layered
 
 
-def fidelity(v1: Union[LOTransformation, np.ndarray], v2: Union[LOTransformation, np.ndarray]) -> float:
+def fidelity(
+        v1: Union[LOTransformation, np.ndarray],
+        v2: Union[LOTransformation, np.ndarray],
+        up_to_out_phases: bool = False
+) -> float:
     """Fidelity between two LO transformations
 
     :param v1: LO transformation or transfer matrix
     :param v2: LO transformation or transfer matrix
+    :param up_to_out_phases: Determine fidelity up to out phases
     :return: Fidelity value
     """
     if isinstance(v1, LOTransformation):
@@ -19,6 +24,9 @@ def fidelity(v1: Union[LOTransformation, np.ndarray], v2: Union[LOTransformation
 
     if isinstance(v2, LOTransformation):
         v2 = v2.tm
+
+    if up_to_out_phases:
+        v1, v2 = _remove_out_phases(v1), _remove_out_phases(v2)
 
     norm_v1 = abs(np.trace(v1.conj().T @ v1))
     norm_v2 = abs(np.trace(v2.conj().T @ v2))
@@ -30,6 +38,7 @@ def df95(
         rt_true: ReconfigurableLOTransformation,
         test_controls: Union[int, List[List[float]]],
         control_max_value: int = 1.,
+        up_to_out_phases: bool = False,
         return_controls: bool = False
 ) -> Union[float, Tuple[float, List[List[float]]]]:
     """This benchmark estimated the ability of reconfigurable LO transformation model to predict transfer matrices.
@@ -39,6 +48,7 @@ def df95(
     :param rt_true: True reconfigurable transformation
     :param test_controls: Number of test configurations or a list of control parameters
     :param control_max_value: Maximum value of control value (if test_controls is int)
+    :param up_to_out_phases: Determine fidelity up to out phases
     :param return_controls: True to return the list of control parameters
     :return: Benchmark value. If return_controls is True, the list of control parameters is also returned
     """
@@ -47,7 +57,7 @@ def df95(
 
     df = []
     for c in test_controls:
-        df.append(1. - fidelity(rt_true.control(c), rt_rec.control(c)))
+        df.append(1. - fidelity(rt_true.control(c), rt_rec.control(c), up_to_out_phases))
     dfq = np.quantile(df, 0.95)
     if return_controls:
         return dfq, test_controls
@@ -73,3 +83,13 @@ def dt_max(lt_rec: Layered, lt_true: Layered) -> float:
         t1, t2 = t1 / (np.sum(t1) / dim), t2 / (np.sum(t2) / dim)
         dt = max(dt, max(np.abs(t1 - t2).flatten()))
     return dt
+
+
+def _remove_out_phases(tm: np.ndarray) -> np.ndarray:
+    """Removes output phases from the transfer matrix
+
+    :param tm: Input transfer matrix
+    :return: Output transfer matrix
+    """
+    out_phases = np.exp(-1j * np.angle(tm[:, 0]))
+    return np.diag(out_phases) @ tm

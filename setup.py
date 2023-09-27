@@ -17,5 +17,5 @@ setup(
     url='https://github.com/PQCLab/ILOptics',
     packages=['iloptics'],
     long_description=read('README.md'),
-    install_requires=['numpy', 'scipy', 'tqdm']
+    install_requires=['numpy', 'scipy', 'tqdm', 'pytest']
 )

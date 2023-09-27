@@ -5,7 +5,7 @@ from tqdm import tqdm
 import numpy as np
 from scipy.linalg import dft, sqrtm
 
-from iloptics import LOTransformation, ReconfigurableLOTransformation, ProtoElement
+from iloptics.lt import LOTransformation, ReconfigurableLOTransformation, ProtoElement
 
 
 class MixLayer(LOTransformation):
@@ -151,9 +151,8 @@ class Layered(ReconfigurableLOTransformation):
     """Layered reconfigurable LO transformation
 
     :param layers: List of transformation layers
-    :param noise_tomo: Statistical noise of transformation tomography
     """
-    def __init__(self, layers: List[LOTransformation], noise_tomo: float = 0.):
+    def __init__(self, layers: List[LOTransformation]):
         assert len(layers) > 0
         self._layers = layers
         self._mix_layers = [layer for layer in layers if isinstance(layer, MixLayer)]
@@ -162,8 +161,7 @@ class Layered(ReconfigurableLOTransformation):
         dim = layers[0].dim
         super(Layered, self).__init__(
             dim=dim,
-            num_controls=len(self._phase_layers) * dim,
-            noise_tomo=noise_tomo
+            num_controls=len(self._phase_layers) * dim
         )
 
     def _get_tm(self) -> np.ndarray:
@@ -219,8 +217,7 @@ class Layered(ReconfigurableLOTransformation):
             hadamard_like: bool = True,
             hadamard_error: float = 0.,
             uniform_losses: float = 0.,
-            non_uniform_losses: float = 0.,
-            noise_tomo: float = 0.
+            non_uniform_losses: float = 0.
     ):
         """Generates random transformation.
 
@@ -233,7 +230,6 @@ class Layered(ReconfigurableLOTransformation):
         :param hadamard_error: The error of setting the Hadamard transforms.
         :param uniform_losses: The level on uniform linear losses.
         :param non_uniform_losses: The level of non-uniform linear losses.
-        :param noise_tomo: Statistical noise of transformation tomography.
         :return: Transformation instance.
         """
         if num_phase_layers is None:
@@ -244,7 +240,7 @@ class Layered(ReconfigurableLOTransformation):
             layers.append(PhaseLayer(dim, control_coupling, control_noise, control_cross_talk))
             if idx_phase_layer < num_phase_layers - 1:
                 layers.append(MixLayer.random(dim, hadamard_like, hadamard_error, uniform_losses, non_uniform_losses))
-        return cls(layers, noise_tomo)
+        return cls(layers)
 
     @classmethod
     def dummy(cls, dim: int, num_phase_layers: int = None, phase_layer_prototype: PhaseLayer = None):
@@ -269,7 +265,8 @@ class Layered(ReconfigurableLOTransformation):
                 layers.append(MixLayer.dummy(dim))
         return cls(layers)
 
-    def learn_proto(self, max_columns: int = None):
+    # === LEARNING BASED ON FULL TOMOGRAPHY ===
+    def learn_proto(self, max_columns: int = None) -> List[ProtoElement]:
         """
         Generates the layered transformation learning protocol
 
@@ -281,8 +278,8 @@ class Layered(ReconfigurableLOTransformation):
             max_columns = dim
 
         proto = [ProtoElement()]
-        for mix_layer in self.mix_layers[:-1]:
-            phase_layer = self.layers[self.layers.index(mix_layer) + 1]
+        for mix_layer in reversed(self.mix_layers[1:]):
+            phase_layer = self.layers[self.layers.index(mix_layer) - 1]
             assert isinstance(phase_layer, PhaseLayer)
 
             for offset in range(0, dim, max_columns):
@@ -303,6 +300,7 @@ class Layered(ReconfigurableLOTransformation):
                 proto.append(ProtoElement(
                     controls=phase_layer.phases2controls(phases),
                     meta={
+                        'phases': phases,
                         'phase_layer_idx': self.phase_layers.index(phase_layer),
                         'mix_layer_idx': self.mix_layers.index(mix_layer),
                         'columns_idx': list(range(offset, offset + d))
@@ -320,40 +318,120 @@ class Layered(ReconfigurableLOTransformation):
         """
         # All phases are disable
         v0 = [d for p, d in zip(proto, data) if p.controls is None][0]
-        v0_inv = v0.conj().T if uni else np.linalg.inv(v0)
+        v0_inv = _inverse(v0, uni)
 
         v_total, v_total_inv = np.eye(self.dim), np.eye(self.dim)
-        for mix_layer in tqdm(self.mix_layers[:-1], disable=not disp):
+        for mix_layer in tqdm(reversed(self.mix_layers[1:]), disable=not disp):
             mix_layer_idx = self.mix_layers.index(mix_layer)
             # Reconstruct inverse matrix for a particular mix layer
-            u_inv = mix_layer.tm.conj().T if uni else np.linalg.inv(mix_layer.tm)
-            for p, d in zip(proto, data):
+            u = mix_layer.tm.copy()
+            for p, vj in zip(proto, data):
                 # Filter elements for current mixing layer only
                 if p.meta is None or p.meta['mix_layer_idx'] != mix_layer_idx:
                     continue
-                cols = _eig_phase_sorted(v_total @ v0_inv @ d @ v_total_inv, len(p.meta['columns_idx']))
-                u_inv[:, p.meta['columns_idx']] = cols
-            # Get direct matrix
+                cols = _eig_phase_sorted(v_total_inv @ vj @ v0_inv @ v_total, len(p.meta['columns_idx']))
+                u[:, p.meta['columns_idx']] = cols
             if uni:
-                u_inv = _project_uni(u_inv)
-                u = u_inv.conj().T
-            else:
-                u = np.linalg.inv(u_inv)
+                u = _project_uni(u)
 
             mix_layer.replace(u)
-            # Update total matrix
-            v_total = u @ v_total
-            v_total_inv = v_total_inv @ u_inv
+            v_total = v_total @ u
+            v_total_inv = _inverse(u, uni) @ v_total_inv
 
-        u = v0 @ v_total_inv
+        u = v_total_inv @ v0
         if uni:
             u = _project_uni(u)
 
-        self.mix_layers[-1].replace(u)
+        self.mix_layers[0].replace(u)
+        return self.update()
+
+    # === LEARNING BASED ON INTENSITY MEASUREMENTS ===
+    def learn_intensity_based_proto(self, max_columns: int = None) -> List[ProtoElement]:
+        """
+        Generates the layered transformation learning protocol based on intensity measurements.
+
+        :param max_columns: Maximum number of mixing layer columns to estimate at a time
+        :return: List of protol elements
+        """
+        proto = []
+        for elem in self.learn_proto(max_columns):
+            proto.append(elem)
+            if elem.controls is None:
+                continue
+
+            phase_layer = self.phase_layers[elem.meta['phase_layer_idx']]
+            phases = 2 * np.pi - elem.meta['phases']
+            proto.append(ProtoElement(
+                controls=phase_layer.phases2controls(phases),
+                meta={
+                    'phases': phases,
+                    'phase_layer_idx': elem.meta['phase_layer_idx'],
+                    'mix_layer_idx': elem.meta['mix_layer_idx'],
+                    'columns_idx': elem.meta['columns_idx'],
+                    'conjugate': True
+                }
+            ))
+        return proto
+
+    def learn_intensity_based(self, proto: List[ProtoElement], data: List[np.ndarray], uni=False, disp=False):
+        """Learns the layered transformation mixing layers using intensity measurements
+
+        :param proto: Learning protocol, generated by learn_proto
+        :param data: Protocol measurements results
+        :param uni: Use unitary constraint on mixing layers
+        :param disp: Display progress
+        """
+        # All phases are disable
+        v0 = [d for p, d in zip(proto, data) if p.controls is None][0]
+        v0_inv = _inverse(v0, uni)
+
+        v_total, v_total_inv = np.eye(self.dim), np.eye(self.dim)
+        for mix_layer in tqdm(reversed(self.mix_layers[1:]), disable=not disp):
+            mix_layer_idx = self.mix_layers.index(mix_layer)
+            # Reconstruct inverse matrix for a particular mix layer
+            u = mix_layer.tm.copy()
+            for idx in range(len(proto)):
+                p = proto[idx]
+                # Filter elements for current mixing layer only
+                if p.meta is None or p.meta['mix_layer_idx'] != mix_layer_idx:
+                    continue
+                # Filter non-conjugate elements
+                if 'conjugate' in p.meta and p.meta['conjugate']:
+                    continue
+
+                assert proto[idx + 1].meta['conjugate']
+                vj, vj_conj = data[idx], data[idx + 1]
+
+                x, y = vj @ v0_inv, v0 @ _inverse(vj_conj, uni)
+                out_phases = np.angle(x[:, 0]) - np.angle(y[:, 0])
+                cols = _eig_phase_sorted(np.diag(np.exp(-1j * out_phases)) @ x, len(p.meta['columns_idx']))
+                cols = v_total_inv @ cols
+
+                u[:, p.meta['columns_idx']] = cols
+
+            mix_layer.replace(u)
+            v_total = v_total @ u
+            v_total_inv = _inverse(u, uni) @ v_total_inv
+
+        u = v_total_inv @ v0
+        if uni:
+            u = _project_uni(u)
+
+        self.mix_layers[0].replace(u)
         return self.update()
 
 
-def _eig_phase_sorted(a: np.ndarray, col_d: int):
+def _inverse(a: np.ndarray, uni: bool) -> np.ndarray:
+    """Return matrix inversion
+
+    :param a: Input matrix
+    :param uni: True if input matrix is unitary
+    :return: Matrix inverse
+    """
+    return a.conj().T if uni else np.linalg.inv(a)
+
+
+def _eig_phase_sorted(a: np.ndarray, col_d: int) -> np.ndarray:
     """Evaluates the part of transfer matrix by eigenvalues phase sorting algorithm
 
     :param a: Input matrix
@@ -369,7 +447,7 @@ def _eig_phase_sorted(a: np.ndarray, col_d: int):
     return v.take(idx, axis=1)
 
 
-def _project_uni(v: np.ndarray):
+def _project_uni(v: np.ndarray) -> np.ndarray:
     """Projects transfer matrix onto the set of unitary matrices
 
     :param v: Input matrix
